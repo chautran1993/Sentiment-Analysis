@@ -1,0 +1,8 @@
+﻿__pycache__/
+*.pyc
+.streamlit/
+models/**/*.pt
+models/**/*.bin
+models/**/*.safetensors
+*.log
+.env

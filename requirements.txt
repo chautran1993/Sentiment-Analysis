@@ -1,0 +1,9 @@
+streamlit
+torch
+transformers
+plotly
+contractions
+numpy
+keras
+h5py
+scikit-learn
