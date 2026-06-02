@@ -142,7 +142,7 @@ class LoadedModel:
 
 st.set_page_config(
     page_title="Phân tích Cảm xúc Bình luận Amazon Electronics",
-    page_icon="💬",
+    page_icon="🛒",
     layout="wide",
 )
 
@@ -202,7 +202,7 @@ def normalize(text: str) -> str:
 
 
 def preprocess_keras_text(text: str) -> str:
-    """Mirror the CNN/LSTM training preprocessing as closely as possible."""
+    """Mirror the CNN/BiLSTM training preprocessing as closely as possible."""
     text = text.lower()
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"(https?://\S+|www\.\S+)", " ", text)
@@ -370,8 +370,36 @@ def load_bert() -> LoadedModel:
         return fallback("BERT", "bert")
 
 
+def model_file_signature() -> tuple[tuple[str, int, int] | tuple[str, None, None], ...]:
+    """Invalidate Streamlit's model cache when local model files change."""
+    paths = [
+        CNN_PATH,
+        LSTM_PATH,
+        VOCAB_PATH,
+        KERAS_CNN_CONFIG,
+        KERAS_CNN_WEIGHTS,
+        KERAS_CNN_TOKENIZER_PATH,
+        KERAS_LSTM_CONFIG,
+        KERAS_LSTM_WEIGHTS,
+        KERAS_LSTM_TOKENIZER_PATH,
+        BERT_DIR / "config.json",
+        BERT_DIR / "model.safetensors",
+        BERT_DIR / "pytorch_model.bin",
+        BERT_DIR / "tokenizer.json",
+        BERT_DIR / "tokenizer_config.json",
+    ]
+    signature = []
+    for path in paths:
+        if path.exists():
+            stat = path.stat()
+            signature.append((str(path), stat.st_size, stat.st_mtime_ns))
+        else:
+            signature.append((str(path), None, None))
+    return tuple(signature)
+
+
 @st.cache_resource(show_spinner="Đang tải mô hình...")
-def load_models() -> list[LoadedModel]:
+def load_models(_signature: tuple[tuple[str, int, int] | tuple[str, None, None], ...]) -> list[LoadedModel]:
     try:
         vocab = load_vocab()
         cnn = load_cnn(vocab)
@@ -449,20 +477,30 @@ def comparison_chart(predictions: dict[str, Prediction]) -> go.Figure:
 
 
 def macro_f1_chart() -> go.Figure:
-    fig = go.Figure(
-        go.Bar(
-            x=["CNN", "LSTM", "BERT"],
-            y=[0.699, 0.718, 0.794],
-            marker_color=["#3498db", "#9b59b6", "#2ecc71"],
-            text=["69.9%", "71.8%", "79.4%"],
+    chart_rows = {
+        "Baseline": [0.6349, 0.6856, 0.7601],
+        "SMOTE": [0.6129, 0.6696, 0.7566],
+        "Class Weights": [0.6503, 0.6841, 0.7585],
+    }
+    colors = {"Baseline": "#3498db", "SMOTE": "#9b59b6", "Class Weights": "#2ecc71"}
+    fig = go.Figure()
+    for strategy, values in chart_rows.items():
+        fig.add_bar(
+            name=strategy,
+            x=["CNN", "BiLSTM", "BERT"],
+            y=values,
+            marker_color=colors[strategy],
+            text=[f"{value:.1%}" for value in values],
             textposition="outside",
+            hovertemplate=f"{strategy}<br>%{{x}}: %{{y:.1%}}<extra></extra>",
         )
-    )
     fig.update_layout(
+        barmode="group",
         height=330,
         yaxis=dict(range=[0, 0.9], tickformat=".0%", title="Macro F1"),
+        xaxis=dict(title="Mô hình"),
         margin=dict(l=20, r=20, t=35, b=30),
-        showlegend=False,
+        legend_title_text="Phương pháp",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="#ffffff",
     )
@@ -470,18 +508,21 @@ def macro_f1_chart() -> go.Figure:
 
 
 def distribution_chart() -> go.Figure:
+    counts = [19075, 7174, 73751]
+    total = sum(counts)
     fig = go.Figure(
         go.Bar(
             x=["Tiêu cực", "Trung lập", "Tích cực"],
-            y=[33333, 33333, 33333],
+            y=counts,
             marker_color=[COLORS[label] for label in LABELS],
-            text=["33.3%", "33.3%", "33.3%"],
+            text=[f"{count / total:.1%}" for count in counts],
             textposition="outside",
+            hovertemplate="%{x}: %{y:,} review (%{text})<extra></extra>",
         )
     )
     fig.update_layout(
         height=330,
-        yaxis=dict(title="Số review", range=[0, 38000]),
+        yaxis=dict(title="Số review", range=[0, 80000]),
         margin=dict(l=20, r=20, t=35, b=30),
         showlegend=False,
         paper_bgcolor="rgba(0,0,0,0)",
@@ -526,25 +567,25 @@ def render_predict_tab(models: list[LoadedModel]) -> None:
         with col:
             st.button(label, use_container_width=True, on_click=set_example, args=(text,))
 
-    review = st.text_area(
+    text = st.text_area(
         "Review",
         key="review_text",
-        height=145,
         label_visibility="collapsed",
+        height=150,
         placeholder="Dán bình luận Amazon Electronics vào đây...",
     )
-
+    active_models = [model for model in models if model.is_real]
     if not st.button("Phân tích", type="primary", use_container_width=True):
         st.info("Nhấn **Phân tích** để chạy CNN, BiLSTM và BERT trên cùng một review.")
         return
-    if not review.strip():
+    if not text.strip():
         st.warning("Vui lòng nhập một bình luận trước khi phân tích.")
         return
 
-    predictions = {model.name: model.predict(review) for model in models if model.is_real}
+    predictions = {model.name: model.predict(text) for model in active_models}
     st.subheader("Kết quả từng mô hình")
-    card_cols = st.columns(3)
-    for col, model in zip(card_cols, models):
+    cols = st.columns(3)
+    for col, model in zip(cols, models):
         with col:
             if model.name not in predictions:
                 st.markdown(
@@ -552,7 +593,7 @@ def render_predict_tab(models: list[LoadedModel]) -> None:
                     <div class="model-card">
                         <div class="model-title">{model.name}</div>
                         <span class="pred-label" style="background:#95a5a6;">Chưa có model thật</span>
-                        <div class="confidence">N/A</div>
+                        <div class="confidence">--</div>
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -575,9 +616,10 @@ def render_predict_tab(models: list[LoadedModel]) -> None:
     if len(predictions) < len(models):
         st.caption("Một số mô hình không có đủ artifact thật/khớp nên không được dùng trong dự đoán live.")
     elif len({pred.label for pred in predictions.values()}) > 1:
-        st.caption("⚠️ Các mô hình không đồng thuận — thường gặp ở bình luận có sắc thái không rõ ràng.")
+        st.caption("⚠️ Các mô hình không đồng thuận - thường gặp ở bình luận có sắc thái không rõ ràng.")
     else:
         st.caption("Các mô hình đang đồng thuận trên review này.")
+
     if predictions:
         st.subheader("So sánh xác suất giữa các mô hình")
         st.plotly_chart(comparison_chart(predictions), use_container_width=True)
@@ -586,31 +628,40 @@ def render_predict_tab(models: list[LoadedModel]) -> None:
 def render_results_tab() -> None:
     st.subheader("Kết quả trên tập test")
     results = [
-        {"Model": "CNN", "Accuracy": "70.0%", "Macro F1": "69.9%", "Precision": "69.8%", "Recall": "70.0%"},
-        {"Model": "LSTM", "Accuracy": "72.0%", "Macro F1": "71.8%", "Precision": "71.7%", "Recall": "72.0%"},
-        {"Model": "BERT", "Accuracy": "79.3%", "Macro F1": "79.4%", "Precision": "79.4%", "Recall": "79.3%"},
+        {"Phương pháp": "Baseline", "Model": "CNN", "Accuracy": "87.5%", "Macro F1": "63.5%", "Precision": "74.4%", "Recall": "64.0%"},
+        {"Phương pháp": "Baseline", "Model": "BiLSTM", "Accuracy": "88.3%", "Macro F1": "68.6%", "Precision": "72.2%", "Recall": "67.5%"},
+        {"Phương pháp": "Baseline", "Model": "BERT", "Accuracy": "90.6%", "Macro F1": "76.0%", "Precision": "76.1%", "Recall": "75.9%"},
+        {"Phương pháp": "SMOTE", "Model": "CNN", "Accuracy": "86.2%", "Macro F1": "61.3%", "Precision": "69.5%", "Recall": "62.8%"},
+        {"Phương pháp": "SMOTE", "Model": "BiLSTM", "Accuracy": "86.8%", "Macro F1": "67.0%", "Precision": "68.5%", "Recall": "66.1%"},
+        {"Phương pháp": "SMOTE", "Model": "BERT", "Accuracy": "90.5%", "Macro F1": "75.7%", "Precision": "75.8%", "Recall": "75.5%"},
+        {"Phương pháp": "Class Weights", "Model": "CNN", "Accuracy": "78.2%", "Macro F1": "65.0%", "Precision": "67.9%", "Recall": "72.1%"},
+        {"Phương pháp": "Class Weights", "Model": "BiLSTM", "Accuracy": "81.8%", "Macro F1": "68.4%", "Precision": "67.6%", "Recall": "74.6%"},
+        {"Phương pháp": "Class Weights", "Model": "BERT", "Accuracy": "89.9%", "Macro F1": "75.9%", "Precision": "74.8%", "Recall": "77.3%"},
     ]
     st.dataframe(results, use_container_width=True, hide_index=True)
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**Macro F1 theo mô hình**")
+        st.markdown("**Macro F1 theo mô hình và phương pháp xử lý mất cân bằng**")
         st.plotly_chart(macro_f1_chart(), use_container_width=True)
     with col2:
-        st.markdown("**Phân bố nhãn cân bằng**")
+        st.markdown("**Phân bố nhãn trong mẫu 100.000 review**")
         st.plotly_chart(distribution_chart(), use_container_width=True)
     st.markdown(
         """
-        **Ghi chú dữ liệu:** dataset = Amazon Electronics Reviews (balanced subset, ~100k reviews,
-        33,333 review mỗi lớp); train/val/test = 70k/15k/15k; đánh giá bằng macro F1.
+        **Ghi chú dữ liệu:** dataset = Amazon Electronics Reviews, lấy mẫu ngẫu nhiên 100.000 review bằng reservoir sampling.
+        Phân phối nhãn giữ theo dữ liệu gốc: Negative 19.1%, Neutral 7.2%, Positive 73.8%.
+        Train/Val/Test = 70k/15k/15k, stratified; đánh giá trên test set bằng macro F1.
 
-        **Kết luận chính:** Neutral là lớp khó nhất cho cả 3 mô hình.
+        **Kết luận chính:** BERT đứng đầu ở cả 3 cấu hình. Baseline cho BERT tốt nhất về Macro F1 (76.0%),
+        trong khi Class Weights tăng Recall macro nhưng làm giảm Accuracy do model chú ý nhiều hơn tới lớp hiếm.
+        Neutral là lớp khó nhất vì chỉ chiếm khoảng 7.2% dữ liệu.
         """
     )
 
 
 def main() -> None:
     inject_css()
-    models = load_models()
+    models = load_models(model_file_signature())
     render_sidebar(models)
     st.title("Phân tích Cảm xúc Bình luận Amazon Electronics")
     st.caption("So sánh CNN, BiLSTM và BERT cho bài toán 3 lớp: Negative / Neutral / Positive.")
